@@ -5,18 +5,15 @@
 #include <fstream>
 #include <sstream>
 #include <limits>
+#include <map>
 #include <algorithm>
 
 const int INF = std::numeric_limits<int>::max();
 
 struct Node {
     int vertex, weight;
-};
-
-struct CompareNode {
-    bool operator()(Node const& n1, Node const& n2) {
-        // Return true if n1 is ordered before n2
-        return n1.weight > n2.weight;
+    bool operator>(const Node& other) const {
+        return this->weight > other.weight;
     }
 };
 
@@ -25,7 +22,7 @@ void dijkstra(const std::vector<std::vector<Node>>& graph, int src, std::vector<
     dist.assign(n, INF);
     dist[src] = 0;
 
-    std::priority_queue<Node, std::vector<Node>, CompareNode> pq;
+    std::priority_queue<Node, std::vector<Node>, std::greater<Node>> pq;
     pq.push({src, 0});
 
     while (!pq.empty()) {
@@ -33,7 +30,9 @@ void dijkstra(const std::vector<std::vector<Node>>& graph, int src, std::vector<
         pq.pop();
         int u = node.vertex;
 
-        for (auto& adj : graph[u]) {
+        if (dist[u] < node.weight) continue;
+
+        for (const auto& adj : graph[u]) {
             int v = adj.vertex;
             int weight = adj.weight;
             if (dist[u] + weight < dist[v]) {
@@ -47,16 +46,18 @@ void dijkstra(const std::vector<std::vector<Node>>& graph, int src, std::vector<
 void readGraph(const std::string& filename, std::vector<std::vector<Node>>& graph, int& num_vertices) {
     std::ifstream file(filename);
     std::string line;
-    num_vertices = 0;
-
     std::map<int, std::vector<std::pair<int, int>>> edges;
-    while (getline(file, line)) {
-        std::istringstream iss(line);
-        int from, to;
-        iss >> from >> to;
-        edges[from].push_back({to, 1});  // Assuming weight = 1 for each edge
-        edges[to].push_back({from, 1});
-        num_vertices = std::max(num_vertices, std::max(from, to));
+
+    if (file.is_open()) {
+        while (getline(file, line)) {
+            std::istringstream iss(line);
+            int from, to;
+            iss >> from >> to;
+            edges[from].push_back({to, 1});  // Assuming weight = 1 for each edge
+            edges[to].push_back({from, 1});
+            num_vertices = std::max(num_vertices, std::max(from, to));
+        }
+        file.close();
     }
     num_vertices++;  // Adjust for 0-indexing
     graph.resize(num_vertices);
@@ -80,28 +81,27 @@ int main(int argc, char** argv) {
     int num_vertices = 0;
 
     if (world_rank == 0) {
-        readGraph("facebook_combined.txt", graph, num_vertices);
+        readGraph("facebook_combined.txt.gz", graph, num_vertices);
     }
-    
+
     MPI_Bcast(&num_vertices, 1, MPI_INT, 0, MPI_COMM_WORLD);
-    
+
     if (world_rank != 0) {
         graph.resize(num_vertices);
     }
 
     // Broadcast graph structure
     for (int i = 0; i < num_vertices; ++i) {
-        int num_adj;
-        if (world_rank == 0) {
-            num_adj = graph[i].size();
-        }
+        int num_adj = graph[i].size();
         MPI_Bcast(&num_adj, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
         if (world_rank != 0) {
             graph[i].resize(num_adj);
         }
 
-        MPI_Bcast(graph[i].data(), num_adj * sizeof(Node), MPI_BYTE, 0, MPI_COMM_WORLD);
+        for (int j = 0; j < num_adj; ++j) {
+            MPI_Bcast(&graph[i][j], sizeof(Node), MPI_BYTE, 0, MPI_COMM_WORLD);
+        }
     }
 
     // Calculate distances from each vertex
