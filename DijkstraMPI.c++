@@ -1,100 +1,144 @@
 #include <mpi.h>
 #include <iostream>
 #include <vector>
-#include <limits>
+#include <queue>
 #include <fstream>
 #include <sstream>
+#include <limits>
+#include <algorithm>
 
-#define INF std::numeric_limits<int>::max()
+const int INF = std::numeric_limits<int>::max();
 
-void readGraph(const char* filename, std::vector<std::vector<int>>& graph, int& num_vertices) {
+struct Node {
+    int vertex, weight;
+};
+
+struct CompareNode {
+    bool operator()(Node const& n1, Node const& n2) {
+        // Return true if n1 is ordered before n2
+        return n1.weight > n2.weight;
+    }
+};
+
+void dijkstra(const std::vector<std::vector<Node>>& graph, int src, std::vector<int>& dist) {
+    int n = graph.size();
+    dist.assign(n, INF);
+    dist[src] = 0;
+
+    std::priority_queue<Node, std::vector<Node>, CompareNode> pq;
+    pq.push({src, 0});
+
+    while (!pq.empty()) {
+        Node node = pq.top();
+        pq.pop();
+        int u = node.vertex;
+
+        for (auto& adj : graph[u]) {
+            int v = adj.vertex;
+            int weight = adj.weight;
+            if (dist[u] + weight < dist[v]) {
+                dist[v] = dist[u] + weight;
+                pq.push({v, dist[v]});
+            }
+        }
+    }
+}
+
+void readGraph(const std::string& filename, std::vector<std::vector<Node>>& graph, int& num_vertices) {
     std::ifstream file(filename);
     std::string line;
-    std::vector<std::pair<int, int>> edges;
+    num_vertices = 0;
 
-    if (file.is_open()) {
-        while (getline(file, line)) {
-            std::istringstream iss(line);
-            int a, b;
-            iss >> a >> b;
-            edges.push_back({a, b});
-            num_vertices = std::max(num_vertices, std::max(a, b));
-        }
-        file.close();
+    std::map<int, std::vector<std::pair<int, int>>> edges;
+    while (getline(file, line)) {
+        std::istringstream iss(line);
+        int from, to;
+        iss >> from >> to;
+        edges[from].push_back({to, 1});  // Assuming weight = 1 for each edge
+        edges[to].push_back({from, 1});
+        num_vertices = std::max(num_vertices, std::max(from, to));
     }
-    num_vertices++;  // Adjust for zero-indexing
+    num_vertices++;  // Adjust for 0-indexing
+    graph.resize(num_vertices);
 
-    graph.assign(num_vertices, std::vector<int>(num_vertices, INF));
-
-    for (auto& edge : edges) {
-        graph[edge.first][edge.second] = 1;  // Assuming undirected graph
-        graph[edge.second][edge.first] = 1;
-    }
-}
-
-void dijkstra(const std::vector<std::vector<int>>& graph, int src, std::vector<int>& dist) {
-    int num_vertices = graph.size();
-    dist.assign(num_vertices, INF);
-    dist[src] = 0;
-    std::vector<bool> sptSet(num_vertices, false);
-
-    for (int count = 0; count < num_vertices - 1; count++) {
-        int u = -1;
-        int min = INF;
-
-        // Pick the minimum distance vertex from the set of vertices not yet processed.
-        for (int v = 0; v < num_vertices; v++) {
-            if (!sptSet[v] && dist[v] <= min) {
-                min = dist[v], u = v;
-            }
-        }
-
-        // Mark the picked vertex as processed
-        sptSet[u] = true;
-
-        // Update dist value of the adjacent vertices of the picked vertex.
-        for (int v = 0; v < num_vertices; v++) {
-            if (!sptSet[v] && graph[u][v] && dist[u] != INF
-                && dist[u] + graph[u][v] < dist[v]) {
-                dist[v] = dist[u] + graph[u][v];
-            }
+    for (const auto& pair : edges) {
+        int u = pair.first;
+        for (const auto& edge : pair.second) {
+            int v = edge.first, weight = edge.second;
+            graph[u].push_back({v, weight});
         }
     }
 }
 
-int main(int argc, char* argv[]) {
+int main(int argc, char** argv) {
     MPI_Init(&argc, &argv);
-
-    int world_size;
+    int world_rank, world_size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 
-    int world_rank;
-    MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
-
-    std::vector<std::vector<int>> graph;
-    std::vector<int> dist;
+    std::vector<std::vector<Node>> graph;
     int num_vertices = 0;
 
     if (world_rank == 0) {
-        readGraph("facebook_combined.txt.gz", graph, num_vertices);
+        readGraph("facebook_combined.txt", graph, num_vertices);
     }
-
+    
     MPI_Bcast(&num_vertices, 1, MPI_INT, 0, MPI_COMM_WORLD);
-
+    
     if (world_rank != 0) {
-        graph.resize(num_vertices, std::vector<int>(num_vertices, INF));
+        graph.resize(num_vertices);
     }
 
-    for (int i = 0; i < num_vertices; i++) {
-        MPI_Bcast(&graph[i][0], num_vertices, MPI_INT, 0, MPI_COMM_WORLD);
-    }
-
-    dijkstra(graph, world_rank, dist);
-
-    if (world_rank == 0) {
-        for (int i = 0; i < num_vertices; i++) {
-            std::cout << "Distance from 0 to " << i << " is " << dist[i] << std::endl;
+    // Broadcast graph structure
+    for (int i = 0; i < num_vertices; ++i) {
+        int num_adj;
+        if (world_rank == 0) {
+            num_adj = graph[i].size();
         }
+        MPI_Bcast(&num_adj, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+        if (world_rank != 0) {
+            graph[i].resize(num_adj);
+        }
+
+        MPI_Bcast(graph[i].data(), num_adj * sizeof(Node), MPI_BYTE, 0, MPI_COMM_WORLD);
+    }
+
+    // Calculate distances from each vertex
+    std::vector<double> local_closeness(num_vertices, 0.0);
+
+    for (int i = world_rank; i < num_vertices; i += world_size) {
+        std::vector<int> dist;
+        dijkstra(graph, i, dist);
+        double sum = 0;
+        for (int d : dist) {
+            if (d != INF) {
+                sum += d;
+            }
+        }
+        if (sum > 0) {
+            local_closeness[i] = (num_vertices - 1) / sum;
+        }
+    }
+
+    // Reduce results to root
+    if (world_rank == 0) {
+        std::vector<double> global_closeness(num_vertices);
+        MPI_Reduce(local_closeness.data(), global_closeness.data(), num_vertices, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+        
+        // Output top 5 centrality values
+        std::vector<std::pair<double, int>> centrality_indices;
+        for (int i = 0; i < num_vertices; ++i) {
+            centrality_indices.push_back({global_closeness[i], i});
+        }
+        std::sort(centrality_indices.rbegin(), centrality_indices.rend());  // Sort descending
+
+        std::cout << "Top 5 Nodes by Closeness Centrality:\n";
+        for (int i = 0; i < 5; ++i) {
+            std::cout << "Node " << centrality_indices[i].second << ": " << centrality_indices[i].first << "\n";
+        }
+    } else {
+        MPI_Reduce(local_closeness.data(), nullptr, num_vertices, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
     }
 
     MPI_Finalize();
